@@ -1,0 +1,16 @@
+# Exemplos de domínios para testar o CMS Detector
+# Você pode copiar esta lista e colar na interface do programa
+
+# Sites conhecidos (para teste)
+drupal.org
+wordpress.org
+joomla.org
+
+# Formato com protocolo
+https://www.drupal.org
+http://wordpress.org
+
+# Formato com subdomínio
+www.joomla.org
+
+# Cole aqui seus próprios domínios para verificar
