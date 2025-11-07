@@ -5,6 +5,10 @@ Script Python com interface gráfica para detectar o CMS (Content Management Sys
 ## 🚀 Características
 
 - **Interface gráfica intuitiva** (tkinter)
+- **Sistema de retry automático**: Tenta até 3 vezes cada domínio que falhar
+  - Backoff exponencial entre tentativas (2s, 4s, 6s)
+  - Mostra "Tentativa X/Y" no status durante retry
+  - Só marca como erro após esgotar todas as tentativas
 - **Detecção robusta de Drupal** com múltiplos métodos:
   - Meta tags Generator
   - Headers HTTP específicos (X-Drupal-Cache)
@@ -114,8 +118,19 @@ O arquivo é salvo com timestamp: `cms_results_YYYYMMDD_HHMMSS.csv`
 Você pode ajustar os timeouts e comportamentos editando a classe `CMSDetector`:
 
 - `self.timeout = 10`: Timeout em segundos para requisições HTTP
+- `self.max_retries = 3`: Número de tentativas antes de marcar como erro
+- `self.retry_delay = 2`: Delay inicial em segundos entre tentativas (usa backoff exponencial)
 - Adicionar novos padrões de detecção
 - Adicionar novos CMS
+
+### Sistema de Retry
+
+O detector tenta automaticamente reconectar quando ocorrem erros de timeout ou conexão:
+
+- **Primeira tentativa**: Imediata
+- **Segunda tentativa**: Aguarda 2 segundos
+- **Terceira tentativa**: Aguarda 4 segundos
+- Se todas falharem, marca como erro e mostra quantas tentativas foram feitas
 
 ## 🔍 Exemplo de Uso
 
@@ -137,8 +152,10 @@ mysite.com
 
 - O script tenta primeiro HTTPS, depois HTTP se falhar
 - Timeout padrão de 10 segundos por site
+- **Sistema de retry**: Até 3 tentativas automáticas para cada site com erro
+- Durante o retry, o status mostra "Tentativa X/Y"
 - A varredura pode ser interrompida clicando em "Parar"
-- Sites inacessíveis aparecem como "Erro" nos resultados
+- Sites inacessíveis (após todas as tentativas) aparecem como "Erro" nos resultados
 
 ## 🤝 Contribuições
 
