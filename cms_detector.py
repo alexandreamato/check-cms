@@ -9,8 +9,9 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import requests
 import re
 import threading
+import time
 from urllib.parse import urlparse, urljoin
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Callable
 import csv
 from datetime import datetime
 
@@ -18,12 +19,14 @@ from datetime import datetime
 class CMSDetector:
     """Classe para detectar CMS de websites"""
 
-    def __init__(self):
+    def __init__(self, max_retries: int = 3):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.timeout = 10
+        self.max_retries = max_retries
+        self.retry_delay = 2  # Delay inicial em segundos entre tentativas
 
     def normalize_url(self, url: str) -> str:
         """Normaliza URL adicionando protocolo se necessário"""
@@ -40,144 +43,175 @@ class CMSDetector:
 
         return url
 
-    def detect_cms(self, url: str) -> Tuple[str, str, Dict]:
+    def detect_cms(self, url: str, retry_callback: Optional[Callable] = None) -> Tuple[str, str, Dict]:
         """
-        Detecta o CMS usado pelo site
+        Detecta o CMS usado pelo site com sistema de retry
         Retorna: (cms_name, confidence, details)
+
+        Args:
+            url: URL do site a verificar
+            retry_callback: Função callback chamada a cada tentativa (recebe attempt, max_retries)
         """
-        try:
-            url = self.normalize_url(url)
-            if not url:
-                return "Erro", "URL inválida", {}
+        url = self.normalize_url(url)
+        if not url:
+            return "Erro", "URL inválida", {}
 
-            # Tenta fazer a requisição
+        last_error = None
+
+        # Tenta até max_retries vezes
+        for attempt in range(1, self.max_retries + 1):
             try:
-                response = self.session.get(url, timeout=self.timeout, allow_redirects=True)
-                html = response.text
-                headers = response.headers
-            except requests.exceptions.SSLError:
-                # Se falhar com HTTPS, tenta HTTP
-                url = url.replace('https://', 'http://')
-                response = self.session.get(url, timeout=self.timeout, allow_redirects=True)
-                html = response.text
-                headers = response.headers
+                # Notifica callback da tentativa atual
+                if retry_callback:
+                    retry_callback(attempt, self.max_retries)
 
-            details = {}
-
-            # 1. DETECÇÃO DRUPAL (PRIORIDADE)
-            drupal_score = 0
-            drupal_indicators = []
-
-            # Verifica meta tag Drupal
-            if re.search(r'<meta[^>]*name=["\']Generator["\'][^>]*content=["\'][^"\']*Drupal[^"\']*["\']', html, re.I):
-                drupal_score += 30
-                drupal_indicators.append("Meta Generator tag")
-
-            # Verifica X-Drupal-Cache header
-            if 'X-Drupal-Cache' in headers or 'X-Generator' in headers and 'Drupal' in headers.get('X-Generator', ''):
-                drupal_score += 25
-                drupal_indicators.append("Drupal headers")
-
-            # Verifica arquivos específicos do Drupal
-            drupal_files = [
-                '/misc/drupal.js',
-                '/CHANGELOG.txt',
-                '/core/CHANGELOG.txt',
-                '/sites/default/files/',
-                '/modules/system/system.css',
-                '/core/misc/drupal.js'
-            ]
-
-            for file in drupal_files:
+                # Tenta fazer a requisição
                 try:
-                    file_url = urljoin(url, file)
-                    file_response = self.session.head(file_url, timeout=5)
-                    if file_response.status_code == 200:
-                        drupal_score += 15
-                        drupal_indicators.append(f"Arquivo encontrado: {file}")
-                        break
-                except:
-                    pass
+                    response = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+                    html = response.text
+                    headers = response.headers
+                except requests.exceptions.SSLError:
+                    # Se falhar com HTTPS, tenta HTTP
+                    url = url.replace('https://', 'http://')
+                    response = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+                    html = response.text
+                    headers = response.headers
 
-            # Verifica padrões no HTML
-            drupal_patterns = [
-                r'Drupal\.settings',
-                r'sites/default/files',
-                r'sites/all/themes',
-                r'/core/misc/drupal',
-                r'drupal-[0-9]',
-                r'data-drupal-selector'
-            ]
+                details = {}
 
-            for pattern in drupal_patterns:
-                if re.search(pattern, html, re.I):
-                    drupal_score += 10
-                    drupal_indicators.append(f"Padrão encontrado: {pattern}")
+                # 1. DETECÇÃO DRUPAL (PRIORIDADE)
+                drupal_score = 0
+                drupal_indicators = []
 
-            # Se detectou Drupal com boa confiança
-            if drupal_score >= 30:
-                confidence = "Alta" if drupal_score >= 50 else "Média"
-                details['indicators'] = drupal_indicators
-                details['score'] = drupal_score
+                # Verifica meta tag Drupal
+                if re.search(r'<meta[^>]*name=["\']Generator["\'][^>]*content=["\'][^"\']*Drupal[^"\']*["\']', html, re.I):
+                    drupal_score += 30
+                    drupal_indicators.append("Meta Generator tag")
 
-                # Tenta detectar versão do Drupal
-                version = self._detect_drupal_version(url, html)
-                if version:
-                    details['version'] = version
+                # Verifica X-Drupal-Cache header
+                if 'X-Drupal-Cache' in headers or 'X-Generator' in headers and 'Drupal' in headers.get('X-Generator', ''):
+                    drupal_score += 25
+                    drupal_indicators.append("Drupal headers")
 
-                return "Drupal", confidence, details
+                # Verifica arquivos específicos do Drupal
+                drupal_files = [
+                    '/misc/drupal.js',
+                    '/CHANGELOG.txt',
+                    '/core/CHANGELOG.txt',
+                    '/sites/default/files/',
+                    '/modules/system/system.css',
+                    '/core/misc/drupal.js'
+                ]
 
-            # 2. DETECÇÃO DE OUTROS CMS
+                for file in drupal_files:
+                    try:
+                        file_url = urljoin(url, file)
+                        file_response = self.session.head(file_url, timeout=5)
+                        if file_response.status_code == 200:
+                            drupal_score += 15
+                            drupal_indicators.append(f"Arquivo encontrado: {file}")
+                            break
+                    except:
+                        pass
 
-            # WordPress
-            if any(pattern in html.lower() for pattern in ['wp-content', 'wp-includes', 'wordpress']):
-                wp_score = 0
-                if re.search(r'<meta[^>]*name=["\']generator["\'][^>]*content=["\']WordPress', html, re.I):
-                    wp_score += 30
-                if '/wp-content/' in html:
-                    wp_score += 20
-                if '/wp-includes/' in html:
-                    wp_score += 20
+                # Verifica padrões no HTML
+                drupal_patterns = [
+                    r'Drupal\.settings',
+                    r'sites/default/files',
+                    r'sites/all/themes',
+                    r'/core/misc/drupal',
+                    r'drupal-[0-9]',
+                    r'data-drupal-selector'
+                ]
 
-                if wp_score >= 30:
-                    return "WordPress", "Alta" if wp_score >= 50 else "Média", {'score': wp_score}
+                for pattern in drupal_patterns:
+                    if re.search(pattern, html, re.I):
+                        drupal_score += 10
+                        drupal_indicators.append(f"Padrão encontrado: {pattern}")
 
-            # Joomla
-            if any(pattern in html.lower() for pattern in ['joomla', '/components/com_', '/administrator/']):
-                joomla_score = 0
-                if re.search(r'<meta[^>]*name=["\']generator["\'][^>]*content=["\']Joomla', html, re.I):
-                    joomla_score += 30
-                if '/components/com_' in html:
-                    joomla_score += 20
+                # Se detectou Drupal com boa confiança
+                if drupal_score >= 30:
+                    confidence = "Alta" if drupal_score >= 50 else "Média"
+                    details['indicators'] = drupal_indicators
+                    details['score'] = drupal_score
 
-                if joomla_score >= 20:
-                    return "Joomla", "Média", {'score': joomla_score}
+                    # Tenta detectar versão do Drupal
+                    version = self._detect_drupal_version(url, html)
+                    if version:
+                        details['version'] = version
 
-            # Magento
-            if any(pattern in html.lower() for pattern in ['magento', 'mage/cookies']):
-                return "Magento", "Média", {}
+                    return "Drupal", confidence, details
 
-            # Wix
-            if 'wix.com' in html.lower() or 'x-wix' in str(headers).lower():
-                return "Wix", "Alta", {}
+                # 2. DETECÇÃO DE OUTROS CMS
 
-            # Shopify
-            if 'shopify' in html.lower() or 'cdn.shopify.com' in html.lower():
-                return "Shopify", "Alta", {}
+                # WordPress
+                if any(pattern in html.lower() for pattern in ['wp-content', 'wp-includes', 'wordpress']):
+                    wp_score = 0
+                    if re.search(r'<meta[^>]*name=["\']generator["\'][^>]*content=["\']WordPress', html, re.I):
+                        wp_score += 30
+                    if '/wp-content/' in html:
+                        wp_score += 20
+                    if '/wp-includes/' in html:
+                        wp_score += 20
 
-            # Squarespace
-            if 'squarespace' in html.lower():
-                return "Squarespace", "Alta", {}
+                    if wp_score >= 30:
+                        return "WordPress", "Alta" if wp_score >= 50 else "Média", {'score': wp_score}
 
-            # Se não detectou nada
-            return "Desconhecido", "N/A", {}
+                # Joomla
+                if any(pattern in html.lower() for pattern in ['joomla', '/components/com_', '/administrator/']):
+                    joomla_score = 0
+                    if re.search(r'<meta[^>]*name=["\']generator["\'][^>]*content=["\']Joomla', html, re.I):
+                        joomla_score += 30
+                    if '/components/com_' in html:
+                        joomla_score += 20
 
-        except requests.exceptions.Timeout:
-            return "Erro", "Timeout", {}
-        except requests.exceptions.ConnectionError:
-            return "Erro", "Conexão falhou", {}
-        except Exception as e:
-            return "Erro", str(e)[:50], {}
+                    if joomla_score >= 20:
+                        return "Joomla", "Média", {'score': joomla_score}
+
+                # Magento
+                if any(pattern in html.lower() for pattern in ['magento', 'mage/cookies']):
+                    return "Magento", "Média", {}
+
+                # Wix
+                if 'wix.com' in html.lower() or 'x-wix' in str(headers).lower():
+                    return "Wix", "Alta", {}
+
+                # Shopify
+                if 'shopify' in html.lower() or 'cdn.shopify.com' in html.lower():
+                    return "Shopify", "Alta", {}
+
+                # Squarespace
+                if 'squarespace' in html.lower():
+                    return "Squarespace", "Alta", {}
+
+                # Se não detectou nada
+                return "Desconhecido", "N/A", {}
+
+            except requests.exceptions.Timeout as e:
+                last_error = ("Timeout", str(e))
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay * attempt)  # Backoff exponencial
+                    continue
+
+            except requests.exceptions.ConnectionError as e:
+                last_error = ("Conexão falhou", str(e))
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay * attempt)  # Backoff exponencial
+                    continue
+
+            except Exception as e:
+                last_error = ("Erro desconhecido", str(e))
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay * attempt)  # Backoff exponencial
+                    continue
+
+        # Se chegou aqui, esgotou todas as tentativas
+        if last_error:
+            error_type, error_msg = last_error
+            details = {'error': error_msg[:100], 'attempts': self.max_retries}
+            return "Erro", error_type, details
+
+        return "Erro", "Desconhecido", {}
 
     def _detect_drupal_version(self, url: str, html: str) -> str:
         """Tenta detectar a versão do Drupal"""
@@ -358,12 +392,19 @@ class CMSDetectorGUI:
             if not self.is_scanning:
                 break
 
-            # Atualizar status
-            self.root.after(0, lambda u=url, i=idx, t=total:
-                          self.status_label.config(text=f"Verificando {i}/{t}: {u}"))
+            # Callback para mostrar tentativas de retry
+            def update_retry_status(attempt, max_retries):
+                if attempt > 1:
+                    self.root.after(0, lambda u=url, i=idx, t=total, a=attempt, m=max_retries:
+                                  self.status_label.config(
+                                      text=f"Verificando {i}/{t}: {u} (Tentativa {a}/{m})"
+                                  ))
+                else:
+                    self.root.after(0, lambda u=url, i=idx, t=total:
+                                  self.status_label.config(text=f"Verificando {i}/{t}: {u}"))
 
-            # Detectar CMS
-            cms, confidence, details = self.detector.detect_cms(url)
+            # Detectar CMS com sistema de retry
+            cms, confidence, details = self.detector.detect_cms(url, retry_callback=update_retry_status)
 
             # Formatar detalhes
             details_str = ""
@@ -373,6 +414,12 @@ class CMSDetectorGUI:
                     details_str = f"Versão: {details['version']} | "
                 if 'indicators' in details:
                     details_str += f"Indicadores: {len(details['indicators'])}"
+            elif cms == "Erro":
+                # Mostrar quantas tentativas foram feitas
+                if 'attempts' in details:
+                    details_str = f"{confidence} (após {details['attempts']} tentativas)"
+                else:
+                    details_str = confidence
             elif 'score' in details:
                 details_str = f"Score: {details['score']}"
 
